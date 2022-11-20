@@ -33,6 +33,7 @@ var Directives = []string{
 	"acl",
 	"any",
 	"chaos",
+	"failover",
 	"loadbalance",
 	"tsig",
 	"cache",
