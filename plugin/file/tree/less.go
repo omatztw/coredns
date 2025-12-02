@@ -2,6 +2,7 @@ package tree
 
 import (
 	"bytes"
+	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -15,20 +16,19 @@ import (
 //
 // The values of a and b are *not* lowercased before the comparison!
 func less(a, b string) int {
-	i := 1
 	aj := len(a)
 	bj := len(b)
 	for {
-		ai, oka := dns.PrevLabel(a, i)
-		bi, okb := dns.PrevLabel(b, i)
+		ai, oka := dns.PrevLabel(a[:aj], 1)
+		bi, okb := dns.PrevLabel(b[:bj], 1)
 		if oka && okb {
 			return 0
 		}
 
 		// sadly this []byte will allocate... TODO(miek): check if this is needed
 		// for a name, otherwise compare the strings.
-		ab := []byte(a[ai:aj])
-		bb := []byte(b[bi:bj])
+		ab := []byte(strings.ToLower(a[ai:aj]))
+		bb := []byte(strings.ToLower(b[bi:bj]))
 		doDDD(ab)
 		doDDD(bb)
 
@@ -37,7 +37,6 @@ func less(a, b string) int {
 			return res
 		}
 
-		i++
 		aj, bj = ai, bi
 	}
 }

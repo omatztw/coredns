@@ -1,11 +1,11 @@
 # 5 steering committee members
-# @chrisohaver, term ends 26 Sept 2023
-# @johnbelamaric, term ends 26 Sept 2023
-# @stp-ip, term ends 26 Sept 2023
-# @superq, term ends 26 Sept 2023
-# @tantalor93, term ends 26 Sept 2023
+# @chrisohaver, term ends 2025-11-21
+# @johnbelamaric, term ends 2025-11-21
+# @stp-ip, term ends 2025-11-21
+# @superq, term ends 2025-11-21
+# @tantalor93, term ends 2025-11-21
 
-*                       @bradbeam @chrisohaver @dilyevsky @jameshartig @greenpau @isolus @johnbelamaric @miekg @pmoroney @rajansandeep @stp-ip @superq @yongtang @Tantalor93
+*                       @bradbeam @chrisohaver @dilyevsky @jameshartig @greenpau @isolus @johnbelamaric @miekg @pmoroney @rajansandeep @stp-ip @superq @yongtang @Tantalor93 @thevilledev
 
 /.circleci/             @miekg @chrisohaver @rajansandeep
 /plugin/pkg/            @miekg @chrisohaver @johnbelamaric @yongtang @stp-ip

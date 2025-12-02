@@ -36,7 +36,7 @@ type Transferer interface {
 	//
 	// If serial is 0, handle as an AXFR request. Transfer should send all records
 	// in the zone to the channel. The SOA should be written to the channel first, followed
-	// by all other records, including all NS + glue records. The implemenation is also responsible
+	// by all other records, including all NS + glue records. The implementation is also responsible
 	// for sending the last SOA record (to signal end of the transfer). This plugin will just grab
 	// these records and send them back to the requester, there is little validation done.
 	//
@@ -134,6 +134,11 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 			select {
 			case ch <- &dns.Envelope{RR: rrs}:
 			case err := <-errCh:
+				// Client errored; drain pchan to avoid blocking the producer goroutine.
+				go func() {
+					for range pchan {
+					}
+				}()
 				return dns.RcodeServerFailure, err
 			}
 			l += len(rrs)
@@ -161,11 +166,7 @@ func (t *Transfer) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	}
 
 	if len(rrs) > 0 {
-		select {
-		case ch <- &dns.Envelope{RR: rrs}:
-		case err := <-errCh:
-			return dns.RcodeServerFailure, err
-		}
+		ch <- &dns.Envelope{RR: rrs}
 		l += len(rrs)
 	}
 

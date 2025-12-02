@@ -6,13 +6,15 @@ import (
 	"testing"
 
 	"github.com/coredns/coredns/plugin/dnstap/msg"
+	"github.com/coredns/coredns/plugin/metadata"
 	test "github.com/coredns/coredns/plugin/test"
 
 	tap "github.com/dnstap/golang-dnstap"
 	"github.com/miekg/dns"
 )
 
-func testCase(t *testing.T, tapq, tapr *tap.Message, q, r *dns.Msg) {
+func testCase(t *testing.T, tapq, tapr *tap.Dnstap, q, r *dns.Msg, extraFormat string) {
+	t.Helper()
 	w := writer{t: t}
 	w.queue = append(w.queue, tapq, tapr)
 	h := Dnstap{
@@ -20,9 +22,17 @@ func testCase(t *testing.T, tapq, tapr *tap.Message, q, r *dns.Msg) {
 			w dns.ResponseWriter, _ *dns.Msg) (int, error) {
 			return 0, w.WriteMsg(r)
 		}),
-		io: &w,
+		io:          &w,
+		ExtraFormat: extraFormat,
 	}
-	_, err := h.ServeDNS(context.TODO(), &test.ResponseWriter{}, q)
+	ctx := metadata.ContextWithMetadata(context.TODO())
+	ok := metadata.SetValueFunc(ctx, "metadata/test", func() string {
+		return "MetadataValue"
+	})
+	if !ok {
+		t.Fatal("Failed to set metadata")
+	}
+	_, err := h.ServeDNS(ctx, &test.ResponseWriter{}, q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +40,7 @@ func testCase(t *testing.T, tapq, tapr *tap.Message, q, r *dns.Msg) {
 
 type writer struct {
 	t     *testing.T
-	queue []*tap.Message
+	queue []*tap.Dnstap
 }
 
 func (w *writer) Dnstap(e *tap.Dnstap) {
@@ -38,20 +48,37 @@ func (w *writer) Dnstap(e *tap.Dnstap) {
 		w.t.Error("Message not expected")
 	}
 
-	ex := w.queue[0]
-	got := e.Message
+	ex := w.queue[0].GetMessage()
+	got := e.GetMessage()
 
-	if string(ex.QueryAddress) != string(got.QueryAddress) {
-		w.t.Errorf("Expected source address %s, got %s", ex.QueryAddress, got.QueryAddress)
+	eaddr := string(ex.GetQueryAddress())
+	gaddr := string(got.GetQueryAddress())
+	if eaddr != gaddr {
+		w.t.Errorf("Expected source address %s, got %s", eaddr, gaddr)
 	}
-	if string(ex.ResponseAddress) != string(got.ResponseAddress) {
-		w.t.Errorf("Expected response address %s, got %s", ex.ResponseAddress, got.ResponseAddress)
+
+	eraddr := string(ex.GetResponseAddress())
+	graddr := string(got.GetResponseAddress())
+	if eraddr != graddr {
+		w.t.Errorf("Expected response address %s, got %s", eraddr, graddr)
 	}
-	if *ex.QueryPort != *got.QueryPort {
-		w.t.Errorf("Expected port %d, got %d", *ex.QueryPort, *got.QueryPort)
+
+	ep := ex.GetQueryPort()
+	gp := got.GetQueryPort()
+	if ep != gp {
+		w.t.Errorf("Expected port %d, got %d", ep, gp)
 	}
-	if *ex.SocketFamily != *got.SocketFamily {
-		w.t.Errorf("Expected socket family %d, got %d", *ex.SocketFamily, *got.SocketFamily)
+
+	ef := ex.GetSocketFamily()
+	sf := got.GetSocketFamily()
+	if ef != sf {
+		w.t.Errorf("Expected socket family %d, got %d", ef, sf)
+	}
+
+	eext := string(w.queue[0].GetExtra())
+	gext := string(e.GetExtra())
+	if eext != gext {
+		w.t.Errorf("Expected extra %s, got %s", eext, gext)
 	}
 	w.queue = w.queue[1:]
 }
@@ -64,11 +91,29 @@ func TestDnstap(t *testing.T) {
 			test.A("example.org. 3600	IN	A 10.0.0.1"),
 		},
 	}.Msg()
-	tapq := testMessage() // leave type unset for deepEqual
-	msg.SetType(tapq, tap.Message_CLIENT_QUERY)
-	tapr := testMessage()
-	msg.SetType(tapr, tap.Message_CLIENT_RESPONSE)
-	testCase(t, tapq, tapr, q, r)
+
+	tapq := &tap.Dnstap{
+		Message: testMessage(),
+	}
+	msg.SetType(tapq.GetMessage(), tap.Message_CLIENT_QUERY)
+	tapr := &tap.Dnstap{
+		Message: testMessage(),
+	}
+	msg.SetType(tapr.GetMessage(), tap.Message_CLIENT_RESPONSE)
+	testCase(t, tapq, tapr, q, r, "")
+
+	tapq_with_extra := &tap.Dnstap{
+		Message: testMessage(), // leave type unset for deepEqual
+		Extra:   []byte("extra_field_MetadataValue_A_example.org._IN_udp_29_10.240.0.1_40212_127.0.0.1"),
+	}
+	msg.SetType(tapq_with_extra.GetMessage(), tap.Message_CLIENT_QUERY)
+	tapr_with_extra := &tap.Dnstap{
+		Message: testMessage(),
+		Extra:   []byte("extra_field_MetadataValue_A_example.org._IN_udp_29_10.240.0.1_40212_127.0.0.1"),
+	}
+	msg.SetType(tapr_with_extra.GetMessage(), tap.Message_CLIENT_RESPONSE)
+	extraFormat := "extra_field_{/metadata/test}_{type}_{name}_{class}_{proto}_{size}_{remote}_{port}_{local}"
+	testCase(t, tapq_with_extra, tapr_with_extra, q, r, extraFormat)
 }
 
 func testMessage() *tap.Message {
@@ -81,4 +126,26 @@ func testMessage() *tap.Message {
 		QueryAddress:   net.ParseIP("10.240.0.1"),
 		QueryPort:      &port,
 	}
+}
+
+func TestTapMessage(t *testing.T) {
+	extraFormat := "extra_field_no_replacement_{/metadata/test}_{type}_{name}_{class}_{proto}_{size}_{remote}_{port}_{local}"
+	tapq := &tap.Dnstap{
+		Message: testMessage(),
+		// extra field would not be replaced, since TapMessage won't pass context
+		Extra: []byte(extraFormat),
+	}
+	msg.SetType(tapq.GetMessage(), tap.Message_CLIENT_QUERY)
+
+	w := writer{t: t}
+	w.queue = append(w.queue, tapq)
+	h := Dnstap{
+		Next: test.HandlerFunc(func(_ context.Context,
+			w dns.ResponseWriter, r *dns.Msg) (int, error) {
+			return 0, w.WriteMsg(r)
+		}),
+		io:          &w,
+		ExtraFormat: extraFormat,
+	}
+	h.TapMessage(tapq.GetMessage())
 }

@@ -8,14 +8,17 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - name: Install Go
-        uses: actions/setup-go@c4a742cab115ed795e34d4513e2cf7d472deb55f
-        with:
-          go-version: '1.19.0'
-        id: go
-
       - name: Check out code
-        uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+
+      - name: Setup Go Version
+        run: echo "GO_VERSION=$(cat .go-version)" >> $GITHUB_ENV
+
+      - name: Install Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c  # v6.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+        id: go
 
       - name: Build
         run: go build -v ./...
@@ -30,14 +33,17 @@ jobs:
     name: Test Plugins
     runs-on: ubuntu-latest
     steps:
-      - name: Install Go
-        uses: actions/setup-go@c4a742cab115ed795e34d4513e2cf7d472deb55f
-        with:
-          go-version: '1.19.0'
-        id: go
-
       - name: Check out code
-        uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+
+      - name: Setup Go Version
+        run: echo "GO_VERSION=$(cat .go-version)" >> $GITHUB_ENV
+
+      - name: Install Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c  # v6.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+        id: go
 
       - name: Build
         run: go build -v ./...
@@ -49,35 +55,41 @@ jobs:
     name: Test e2e
     runs-on: ubuntu-latest
     steps:
-      - name: Install Go
-        uses: actions/setup-go@c4a742cab115ed795e34d4513e2cf7d472deb55f
-        with:
-          go-version: '1.19.0'
-        id: go
-
       - name: Check out code
-        uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+
+      - name: Setup Go Version
+        run: echo "GO_VERSION=$(cat .go-version)" >> $GITHUB_ENV
+
+      - name: Install Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c  # v6.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+        id: go
 
       - name: Build
         run: go build -v ./...
 
       - name: Test
         run: |
-          go install github.com/fatih/faillint || true
+          go install github.com/fatih/faillint@c56e3ec6dbfc933bbeb884fd31f2bcd41f712657 # v1.15.0
           ( cd test; go test -race ./... )
 
   test-makefile-release:
     name: Test Makefile.release
     runs-on: ubuntu-latest
     steps:
+      - name: Check out code
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+
       - name: Install dependencies
         run: sudo apt-get install make curl
 
-      - name: Check out code
-        uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
+      - name: Test Makefile.release release
+        run: make GITHUB_ACCESS_TOKEN=x release -f Makefile.release
 
-      - name: Test Makefile.release
+      - name: Test Makefile.release release/github-push (dry-run)
         run: make GITHUB_ACCESS_TOKEN=x -n release github-push -f Makefile.release
 
-      - name: Test Makefile.docker
+      - name: Test Makefile.docker release/github-push (dry-run)
         run: make VERSION=x DOCKER=x -n release docker-push -f Makefile.docker

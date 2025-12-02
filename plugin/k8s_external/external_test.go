@@ -87,7 +87,7 @@ var tests = []test.Case{
 	{
 		Qname: "svc1.testns.example.com.", Qtype: dns.TypeSRV, Rcode: dns.RcodeSuccess,
 		Answer: []dns.RR{test.SRV("svc1.testns.example.com.	5	IN	SRV	0 100 80 svc1.testns.example.com.")},
-		Extra: []dns.RR{test.A("svc1.testns.example.com.  5       IN      A       1.2.3.4")},
+		Extra:  []dns.RR{test.A("svc1.testns.example.com.  5       IN      A       1.2.3.4")},
 	},
 	// SRV Service Not udp/tcp
 	{
@@ -286,10 +286,17 @@ func (external) Run()                                      {}
 func (external) Stop() error                               { return nil }
 func (external) EpIndexReverse(string) []*object.Endpoints { return nil }
 func (external) SvcIndexReverse(string) []*object.Service  { return nil }
-func (external) Modified(bool) int64                       { return 0 }
+func (external) Modified(kubernetes.ModifiedMode) int64    { return 0 }
+
+func (external) SvcImportIndex(s string) []*object.ServiceImport                    { return nil }
+func (external) ServiceImportList() []*object.ServiceImport                         { return nil }
+func (external) McEpIndex(s string) []*object.MultiClusterEndpoints                 { return nil }
+func (external) MultiClusterEndpointsList(s string) []*object.MultiClusterEndpoints { return nil }
+
 func (external) EpIndex(s string) []*object.Endpoints {
 	return epIndexExternal[s]
 }
+
 func (external) EndpointsList() []*object.Endpoints {
 	var eps []*object.Endpoints
 	for _, ep := range epIndexExternal {

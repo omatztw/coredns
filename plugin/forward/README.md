@@ -45,11 +45,15 @@ forward FROM TO... {
     prefer_udp
     expire DURATION
     max_fails INTEGER
+    max_connect_attempts INTEGER
     tls CERT KEY CA
     tls_servername NAME
     policy random|round_robin|sequential
     health_check DURATION [no_rec] [domain FQDN]
     max_concurrent MAX
+    next RCODE_1 [RCODE_2] [RCODE_3...]
+    failfast_all_unhealthy_upstreams
+    failover RCODE_1 [RCODE_2] [RCODE_3...]
 }
 ~~~
 
@@ -63,6 +67,9 @@ forward FROM TO... {
 * `max_fails` is the number of subsequent failed health checks that are needed before considering
   an upstream to be down. If 0, the upstream will never be marked as down (nor health checked).
   Default is 2.
+* `max_connect_attempts` caps the total number of upstream connect attempts
+  performed for a single incoming DNS request. Default value of 0 means no per-request
+  cap.
 * `expire` **DURATION**, expire (cached) connections after this time, the default is 10s.
 * `tls` **CERT** **KEY** **CA** define the TLS properties for TLS connection. From 0 to 3 arguments can be
   provided with the meaning as described below
@@ -75,11 +82,16 @@ forward FROM TO... {
     The server certificate is verified using the specified CA file
 
 * `tls_servername` **NAME** allows you to set a server name in the TLS configuration; for instance 9.9.9.9
-  needs this to be set to `dns.quad9.net`. Multiple upstreams are still allowed in this scenario,
-  but they have to use the same `tls_servername`. E.g. mixing 9.9.9.9 (QuadDNS) with 1.1.1.1
-  (Cloudflare) will not work. Using TLS forwarding but not setting `tls_servername` results in anyone
+  needs this to be set to `dns.quad9.net`. Using TLS forwarding but not setting `tls_servername` results in anyone
   being able to man-in-the-middle your connection to the DNS server you are forwarding to. Because of this,
   it is strongly recommended to set this value when using TLS forwarding.
+
+  Per destination endpoint TLS server name indication is possible in the form of `tls://9.9.9.9%dns.quad9.net`.
+  `tls_servername` must not be specified when using per destination endpoint TLS server name indication
+  as it would introduce clash between the server name indication spectifications. If destination endpoint
+  is to be reached via a port other than 853 then the port must be appended to the end of the destination
+  endpoint specifier. In case of port 10853, the above string would be: `tls://9.9.9.9%dns.quad9.net:10853`.
+
 * `policy` specifies the policy to use for selecting upstream servers. The default is `random`.
   * `random` is a policy that implements random upstream selection.
   * `round_robin` is a policy that selects hosts based on round robin ordering.
@@ -95,9 +107,12 @@ forward FROM TO... {
   response does not count as a health failure. When choosing a value for **MAX**, pick a number
   at least greater than the expected *upstream query rate* * *latency* of the upstream servers.
   As an upper bound for **MAX**, consider that each concurrent query will use about 2kb of memory.
+* `next` If the `RCODE` (i.e. `NXDOMAIN`) is returned by the remote then execute the next plugin. If no next plugin is defined, or the next plugin is not a `forward` plugin, this setting is ignored
+* `failfast_all_unhealthy_upstreams` - determines the handling of requests when all upstream servers are unhealthy and unresponsive to health checks. Enabling this option will immediately return SERVFAIL responses for all requests. By default, requests are sent to a random upstream.
+* `failover` - By default when a DNS lookup fails to return a DNS response (e.g. timeout), _forward_ will attempt a lookup on the next upstream server. The `failover` option will make _forward_ do the same for any response with a response code matching an `RCODE` ( e.g. `SERVFAIL`、`REFUSED`). `NOERROR` cannot be used. If all upstreams have been tried, the response from the last attempt is returned.
 
 Also note the TLS config is "global" for the whole forwarding proxy if you need a different
-`tls-name` for different upstreams you're out of luck.
+`tls_servername` for different upstreams you're out of luck.
 
 On each endpoint, the timeouts for communication are set as follows:
 
@@ -115,19 +130,27 @@ plugin is also enabled:
 
 If monitoring is enabled (via the *prometheus* plugin) then the following metric are exported:
 
-* `coredns_forward_requests_total{to}` - query count per upstream.
-* `coredns_forward_responses_total{to}` - Counter of responses received per upstream.
-* `coredns_forward_request_duration_seconds{to, rcode, type}` - duration per upstream, RCODE, type
-* `coredns_forward_responses_total{to, rcode}` - count of RCODEs per upstream.
-* `coredns_forward_healthcheck_failures_total{to}` - number of failed health checks per upstream.
-* `coredns_forward_healthcheck_broken_total{}` - counter of when all upstreams are unhealthy,
+* `coredns_forward_healthcheck_broken_total{}` - count of when all upstreams are unhealthy,
   and we are randomly (this always uses the `random` policy) spraying to an upstream.
-* `coredns_forward_max_concurrent_rejects_total{}` - counter of the number of queries rejected because the
+* `coredns_forward_max_concurrent_rejects_total{}` - count of queries rejected because the
   number of concurrent queries were at maximum.
-* `coredns_forward_conn_cache_hits_total{to, proto}` - counter of connection cache hits per upstream and protocol.
-* `coredns_forward_conn_cache_misses_total{to, proto}` - counter of connection cache misses per upstream and protocol.
+* `coredns_proxy_request_duration_seconds{proxy_name="forward", to, rcode}` - histogram per upstream, RCODE
+* `coredns_proxy_healthcheck_failures_total{proxy_name="forward", to, rcode}`- count of failed health checks per upstream.
+* `coredns_proxy_conn_cache_hits_total{proxy_name="forward", to, proto}`- count of connection cache hits per upstream and protocol.
+* `coredns_proxy_conn_cache_misses_total{proxy_name="forward", to, proto}` - count of connection cache misses per upstream and protocol.
+
 Where `to` is one of the upstream servers (**TO** from the config), `rcode` is the returned RCODE
 from the upstream, `proto` is the transport protocol like `udp`, `tcp`, `tcp-tls`.
+
+The following metrics have recently been deprecated:
+* `coredns_forward_healthcheck_failures_total{to, rcode}`
+  * Can be replaced with `coredns_proxy_healthcheck_failures_total{proxy_name="forward", to, rcode}`
+* `coredns_forward_requests_total{to}`
+  * Can be replaced with `sum(coredns_proxy_request_duration_seconds_count{proxy_name="forward", to})`
+* `coredns_forward_responses_total{to, rcode}`
+  * Can be replaced with `coredns_proxy_request_duration_seconds_count{proxy_name="forward", to, rcode}`
+* `coredns_forward_request_duration_seconds{to, rcode}`
+  * Can be replaced with `coredns_proxy_request_duration_seconds{proxy_name="forward", to, rcode}`
 
 ## Examples
 
@@ -248,15 +271,41 @@ Or when you have multiple DoT upstreams with different `tls_servername`s, you ca
 }
 
 .:5301 {
-    forward . 8.8.8.8 8.8.4.4 {
+    forward . tls://8.8.8.8 tls://8.8.4.4 {
         tls_servername dns.google
     }
 }
 
 .:5302 {
-    forward . 1.1.1.1 1.0.0.1 {
+    forward . tls://1.1.1.1 tls://1.0.0.1 {
         tls_servername cloudflare-dns.com
     }
+}
+~~~
+
+The following would try 1.2.3.4 first. If the response is `NXDOMAIN`, try 5.6.7.8. If the response from 5.6.7.8 is `NXDOMAIN`, try 9.0.1.2.
+
+~~~ corefile
+. {
+  forward . 1.2.3.4 {
+    next NXDOMAIN
+  }
+  forward . 5.6.7.8 {
+    next NXDOMAIN
+  }
+  forward . 9.0.1.2 {
+  }
+}
+~~~
+
+In the following example, if the response from `1.2.3.4` is `SERVFAIL` or `REFUSED`, it will try `5.6.7.8`. If the response from `5.6.7.8` is `SERVFAIL ` or `REFUSED`, it will try `9.0.1.2`.
+
+~~~ corefile
+. {
+  forward . 1.2.3.4 5.6.7.8 9.0.1.2 {
+     policy sequential
+     failover SERVFAIL REFUSED
+  }
 }
 ~~~
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
@@ -37,7 +38,7 @@ func setup(c *caddy.Controller) error {
 		}
 
 		for _, ip := range ips {
-			if !isIn(ip, except) {
+			if !slices.Contains(except, ip) {
 				all = append(all, ip)
 			}
 		}
@@ -82,8 +83,15 @@ func listIP(args []string, ifaces []net.Interface) ([]string, error) {
 				}
 				for _, addr := range addrs {
 					if ipnet, ok := addr.(*net.IPNet); ok {
-						if ipnet.IP.To4() != nil || (!ipnet.IP.IsLinkLocalMulticast() && !ipnet.IP.IsLinkLocalUnicast()) {
-							all = append(all, ipnet.IP.String())
+						ipa, err := net.ResolveIPAddr("ip", ipnet.IP.String())
+						if err == nil {
+							if ipnet.IP.To4() == nil &&
+								(ipnet.IP.IsLinkLocalMulticast() || ipnet.IP.IsLinkLocalUnicast()) {
+								if ipa.Zone == "" {
+									ipa.Zone = iface.Name
+								}
+							}
+							all = append(all, ipa.String())
 						}
 					}
 				}
@@ -97,15 +105,4 @@ func listIP(args []string, ifaces []net.Interface) ([]string, error) {
 		}
 	}
 	return all, nil
-}
-
-// isIn checks if a string array contains an element
-func isIn(s string, list []string) bool {
-	is := false
-	for _, l := range list {
-		if s == l {
-			is = true
-		}
-	}
-	return is
 }

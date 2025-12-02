@@ -8,8 +8,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// Notify will send notifies to all configured to hosts IP addresses. If the zone isn't known
-// to t an error will be returned. The string zone must be lowercased.
+// Notify will send notifies to all configured to hosts IP addresses. The string zone must be lowercased.
 func (t *Transfer) Notify(zone string) error {
 	if t == nil { // t might be nil, mostly expected in tests, so intercept and to a noop in that case
 		return nil
@@ -21,7 +20,8 @@ func (t *Transfer) Notify(zone string) error {
 
 	x := longestMatch(t.xfrs, zone)
 	if x == nil {
-		return fmt.Errorf("no such zone registred in the transfer plugin: %s", zone)
+		// return without error if there is no matching zone
+		return nil
 	}
 
 	var err1 error
@@ -39,10 +39,11 @@ func (t *Transfer) Notify(zone string) error {
 
 func sendNotify(c *dns.Client, m *dns.Msg, s string) error {
 	var err error
+	var ret *dns.Msg
 
 	code := dns.RcodeServerFailure
-	for i := 0; i < 3; i++ {
-		ret, _, err := c.Exchange(m, s)
+	for range 3 {
+		ret, _, err = c.Exchange(m, s)
 		if err != nil {
 			continue
 		}

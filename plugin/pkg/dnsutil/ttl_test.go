@@ -26,7 +26,7 @@ func TestMinimalTTL(t *testing.T) {
 		t.Fatalf("Expected type to be response.NoData, got %s", mt)
 	}
 	dur := MinimalTTL(m, mt) // minTTL on msg is 3600 (neg. ttl on SOA)
-	if dur != time.Duration(1800*time.Second) {
+	if dur != 1800*time.Second {
 		t.Fatalf("Expected minttl duration to be %d, got %d", 1800, dur)
 	}
 
@@ -36,7 +36,7 @@ func TestMinimalTTL(t *testing.T) {
 		t.Fatalf("Expected type to be response.NameError, got %s", mt)
 	}
 	dur = MinimalTTL(m, mt) // minTTL on msg is 3600 (neg. ttl on SOA)
-	if dur != time.Duration(1800*time.Second) {
+	if dur != 1800*time.Second {
 		t.Fatalf("Expected minttl duration to be %d, got %d", 1800, dur)
 	}
 }
@@ -62,8 +62,7 @@ func BenchmarkMinimalTTL(b *testing.B) {
 	utc := time.Now().UTC()
 	mt, _ := response.Typify(m, utc)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		dur := MinimalTTL(m, mt)
 		if dur != 1000*time.Second {
 			b.Fatalf("Wrong MinimalTTL %d, expected %d", dur, 1000*time.Second)

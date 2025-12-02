@@ -4,10 +4,10 @@
 ![CodeQL](https://github.com/coredns/coredns/actions/workflows/codeql-analysis.yml/badge.svg)
 ![Go Tests](https://github.com/coredns/coredns/actions/workflows/go.test.yml/badge.svg)
 [![CircleCI](https://circleci.com/gh/coredns/coredns.svg?style=shield)](https://circleci.com/gh/coredns/coredns)
-[![Code Coverage](https://img.shields.io/codecov/c/github/coredns/coredns/master.svg)](https://codecov.io/github/coredns/coredns?branch=master)
 [![Docker Pulls](https://img.shields.io/docker/pulls/coredns/coredns.svg)](https://hub.docker.com/r/coredns/coredns)
 [![Go Report Card](https://goreportcard.com/badge/github.com/coredns/coredns)](https://goreportcard.com/report/coredns/coredns)
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/1250/badge)](https://bestpractices.coreinfrastructure.org/projects/1250)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coredns/coredns/badge)](https://scorecard.dev/viewer/?uri=github.com/coredns/coredns)
 
 CoreDNS is a DNS server/forwarder, written in Go, that chains [plugins](https://coredns.io/plugins).
 Each plugin performs a (DNS) function.
@@ -18,9 +18,13 @@ CoreDNS is a fast and flexible DNS server. The key word here is *flexible*: with
 are able to do what you want with your DNS data by utilizing plugins. If some functionality is not
 provided out of the box you can add it by [writing a plugin](https://coredns.io/explugins).
 
-CoreDNS can listen for DNS requests coming in over UDP/TCP (go'old DNS), TLS ([RFC
-7858](https://tools.ietf.org/html/rfc7858)), also called DoT, DNS over HTTP/2 - DoH -
-([RFC 8484](https://tools.ietf.org/html/rfc8484)) and [gRPC](https://grpc.io) (not a standard).
+CoreDNS can listen for DNS requests coming in over:
+* UDP/TCP (go'old DNS).
+* TLS - DoT ([RFC 7858](https://tools.ietf.org/html/rfc7858)).
+* DNS over HTTP/2 - DoH ([RFC 8484](https://tools.ietf.org/html/rfc8484)).
+* DNS over HTTP/3 - DoH3
+* DNS over QUIC - DoQ ([RFC 9250](https://tools.ietf.org/html/rfc9250)). 
+* [gRPC](https://grpc.io) (not a standard).
 
 Currently CoreDNS is able to:
 
@@ -53,7 +57,7 @@ out-of-tree plugins.
 To compile CoreDNS, we assume you have a working Go setup. See various tutorials if you don’t have
 that already configured.
 
-First, make sure your golang version is 1.17 or higher as `go mod` support and other api is needed.
+First, make sure your golang version is 1.24.0 or higher as `go mod` support and other api is needed.
 See [here](https://github.com/golang/go/wiki/Modules) for `go mod` details.
 Then, check out the project and run `make` to compile the binary:
 
@@ -63,6 +67,8 @@ $ cd coredns
 $ make
 ~~~
 
+> **_NOTE:_**  extra plugins may be enabled when building by setting the `COREDNS_PLUGINS` environment variable with comma separate list of plugins in the same format as plugin.cfg
+
 This should yield a `coredns` binary.
 
 ## Compilation with Docker
@@ -71,7 +77,9 @@ CoreDNS requires Go to compile. However, if you already have docker installed an
 setup a Go environment, you could build CoreDNS easily:
 
 ```
-$ docker run --rm -i -t -v $PWD:/v -w /v golang:1.18 make
+docker run --rm -i -t \
+    -v $PWD:/go/src/github.com/coredns/coredns -w /go/src/github.com/coredns/coredns \
+        golang:1.24 sh -c 'GOFLAGS="-buildvcs=false" make gen && GOFLAGS="-buildvcs=false" make'
 ```
 
 The above command alone will have `coredns` binary generated.
@@ -211,6 +219,15 @@ tls://example.org grpc://example.org {
 }
 ~~~
 
+Similarly, for QUIC (DoQ):
+
+~~~ corefile
+quic://example.org {
+    whoami
+    tls mycert mykey
+}
+~~~
+
 And for DNS over HTTP/2 (DoH) use:
 
 ~~~ corefile
@@ -237,26 +254,37 @@ grpc://example.org:1443 https://example.org:1444 {
 }
 ~~~
 
+And for DNS over HTTP/3 (DoH3) use:
+
+~~~ corefile
+https3://example.org {
+    whoami
+    tls mycert mykey
+}
+~~~
+in this setup, the CoreDNS will be responsible for TLS termination
+
+
 When no transport protocol is specified the default `dns://` is assumed.
 
 ## Community
 
-We're most active on Github (and Slack):
+We're most active on GitHub (and Slack):
 
-- Github: <https://github.com/coredns/coredns>
+- GitHub: <https://github.com/coredns/coredns>
 - Slack: #coredns on <https://slack.cncf.io>
 
 More resources can be found:
 
 - Website: <https://coredns.io>
-- Blog: <https://blog.coredns.io>
+- Blog: <https://coredns.io/blog/>
 - Twitter: [@corednsio](https://twitter.com/corednsio)
 - Mailing list/group: <coredns-discuss@googlegroups.com> (not very active)
 
 ## Contribution guidelines
 
 If you want to contribute to CoreDNS, be sure to review the [contribution
-guidelines](CONTRIBUTING.md).
+guidelines](./.github/CONTRIBUTING.md).
 
 ## Deployment
 
@@ -292,4 +320,4 @@ issue, instead send your report privately to `security@coredns.io`. Security rep
 appreciated and we will publicly thank you for it.
 
 Please consult [security vulnerability disclosures and security fix and release process
-document](https://github.com/coredns/coredns/blob/master/SECURITY.md)
+document](https://github.com/coredns/coredns/blob/master/.github/SECURITY.md)

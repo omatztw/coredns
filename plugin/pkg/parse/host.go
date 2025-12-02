@@ -30,9 +30,17 @@ func stripZone(host string) string {
 // and in case of filename a resolv.conf like file is (assumed) and parsed and
 // the nameservers found are returned.
 func HostPortOrFile(s ...string) ([]string, error) {
-	var servers []string
+	var servers []string //nolint:prealloc // impossible to know the final length upfront
 	for _, h := range s {
 		trans, host := Transport(h)
+		if len(host) == 0 {
+			return servers, fmt.Errorf("invalid address: %q", h)
+		}
+
+		if trans == transport.UNIX {
+			servers = append(servers, trans+"://"+host)
+			continue
+		}
 
 		addr, _, err := net.SplitHostPort(host)
 
@@ -53,6 +61,8 @@ func HostPortOrFile(s ...string) ([]string, error) {
 				ss = net.JoinHostPort(host, transport.Port)
 			case transport.TLS:
 				ss = transport.TLS + "://" + net.JoinHostPort(host, transport.TLSPort)
+			case transport.QUIC:
+				ss = transport.QUIC + "://" + net.JoinHostPort(host, transport.QUICPort)
 			case transport.GRPC:
 				ss = transport.GRPC + "://" + net.JoinHostPort(host, transport.GRPCPort)
 			case transport.HTTPS:
@@ -89,7 +99,7 @@ func tryFile(s string) ([]string, error) {
 
 	servers := []string{}
 	for _, s := range c.Servers {
-		servers = append(servers, net.JoinHostPort(s, c.Port))
+		servers = append(servers, net.JoinHostPort(stripZone(s), c.Port))
 	}
 	return servers, nil
 }

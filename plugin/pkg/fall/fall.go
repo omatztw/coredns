@@ -10,10 +10,11 @@
 // See https://github.com/coredns/coredns/issues/2723 for some discussion on this, which includes this quote:
 //
 // TL;DR: `fallthrough` is indeed risky and hackish, but still a good feature of CoreDNS as it allows to quickly answer boring edge cases.
-//
 package fall
 
 import (
+	"slices"
+
 	"github.com/coredns/coredns/plugin"
 )
 
@@ -49,15 +50,7 @@ func (f *F) SetZonesFromArgs(zones []string) {
 
 // Equal returns true if f and g are equal.
 func (f *F) Equal(g F) bool {
-	if len(f.Zones) != len(g.Zones) {
-		return false
-	}
-	for i := range f.Zones {
-		if f.Zones[i] != g.Zones[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(f.Zones, g.Zones)
 }
 
 // Zero returns a zero valued F.

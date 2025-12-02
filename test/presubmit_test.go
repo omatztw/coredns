@@ -238,14 +238,20 @@ func (w *testImportOrderingWalker) walk(path string, info os.FileInfo, _ error) 
 	blocks := [3][]*ast.ImportSpec{}
 	prevpos := 0
 	bl := 0
+	reportedTooManyBlocks := false
 	for _, im := range f.Imports {
 		line := fs.Position(im.Path.Pos()).Line
 		if line-prevpos > 1 && prevpos > 0 {
 			bl++
 		}
 		if bl > 2 {
-			absPath, _ := filepath.Abs(path)
-			w.Errors = append(w.Errors, fmt.Errorf("more than %d import blocks in %q", bl, absPath))
+			if !reportedTooManyBlocks {
+				absPath, _ := filepath.Abs(path)
+				w.Errors = append(w.Errors, fmt.Errorf("more than %d import blocks in %q", bl, absPath))
+				reportedTooManyBlocks = true
+			}
+			// Clamp to last valid block index to avoid out-of-bounds access
+			bl = 2
 		}
 		blocks[bl] = append(blocks[bl], im)
 		prevpos = line
@@ -260,7 +266,7 @@ func (w *testImportOrderingWalker) walk(path string, info os.FileInfo, _ error) 
 	}
 
 	// Ok, now that we have the type, let's see if all members adhere to it.
-	// After that we check if the are in the right order.
+	// After that we check if they are in the right order.
 	for i := 0; i <= bl; i++ {
 		for _, p := range blocks[i] {
 			t := importtype(p.Path.Value)
@@ -308,7 +314,7 @@ func importtype(s string) string {
 	return "std"
 }
 
-// TestMetricNaming tests the imports path used for metrics. It depends on faillint to be installed: go install github.com/fatih/faillint
+// TestPrometheusImports tests the imports path used for metrics. It depends on faillint to be installed: go install github.com/fatih/faillint
 func TestPrometheusImports(t *testing.T) {
 	if _, err := exec.LookPath("faillint"); err != nil {
 		fmt.Fprintf(os.Stderr, "Not executing TestPrometheusImports: faillint not found\n")

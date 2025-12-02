@@ -3,9 +3,15 @@ package grpc
 import (
 	"context"
 	"errors"
+	"net"
+	"path"
+	"slices"
 	"testing"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/pb"
+	"github.com/coredns/coredns/plugin/pkg/dnstest"
+	"github.com/coredns/coredns/plugin/test"
 
 	"github.com/miekg/dns"
 	"google.golang.org/grpc"
@@ -56,6 +62,33 @@ func TestProxy(t *testing.T) {
 	}
 }
 
+func TestProxy_RejectsOversizedReply(t *testing.T) {
+	p := &Proxy{}
+	oversized := make([]byte, maxDNSMessageBytes+1)
+	p.client = testServiceClient{dnsPacket: &pb.DnsPacket{Msg: oversized}, err: nil}
+	_, err := p.query(context.TODO(), new(dns.Msg))
+	if !errors.Is(err, ErrDNSMessageTooLarge) {
+		t.Fatalf("expected %v, got %v", ErrDNSMessageTooLarge, err)
+	}
+}
+
+func TestProxy_RejectsOversizedRequest(t *testing.T) {
+	p := &Proxy{}
+	p.client = testServiceClient{dnsPacket: &pb.DnsPacket{Msg: []byte("ok")}, err: nil}
+
+	oversizedMsg := &dns.Msg{}
+	oversizedMsg.SetQuestion("example.org.", dns.TypeA)
+	oversizedMsg.Extra = slices.Repeat([]dns.RR{&dns.TXT{
+		Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 300},
+		Txt: []string{"very long text record to make the message oversized when packed"},
+	}}, 2000)
+
+	_, err := p.query(context.TODO(), oversizedMsg)
+	if !errors.Is(err, ErrDNSMessageTooLarge) {
+		t.Fatalf("expected %v, got %v", ErrDNSMessageTooLarge, err)
+	}
+}
+
 type testServiceClient struct {
 	dnsPacket *pb.DnsPacket
 	err       error
@@ -63,4 +96,53 @@ type testServiceClient struct {
 
 func (m testServiceClient) Query(ctx context.Context, in *pb.DnsPacket, opts ...grpc.CallOption) (*pb.DnsPacket, error) {
 	return m.dnsPacket, m.err
+}
+
+func TestProxyUnix(t *testing.T) {
+	tdir := t.TempDir()
+
+	fd := path.Join(tdir, "test.grpc")
+	listener, err := net.Listen("unix", fd)
+	if err != nil {
+		t.Fatal("Failed to listen: ", err)
+	}
+	defer listener.Close()
+
+	server := grpc.NewServer()
+	pb.RegisterDnsServiceServer(server, &grpcDnsServiceServer{})
+
+	go server.Serve(listener)
+	defer server.Stop()
+
+	c := caddy.NewTestController("dns", "grpc . unix://"+fd)
+	g, err := parseGRPC(c)
+
+	if err != nil {
+		t.Errorf("Failed to create forwarder: %s", err)
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.org.", dns.TypeA)
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+
+	if _, err := g.ServeDNS(context.TODO(), rec, m); err != nil {
+		t.Fatal("Expected to receive reply, but didn't")
+	}
+	if x := rec.Msg.Answer[0].Header().Name; x != "example.org." {
+		t.Errorf("Expected %s, got %s", "example.org.", x)
+	}
+}
+
+type grpcDnsServiceServer struct {
+	pb.UnimplementedDnsServiceServer
+}
+
+func (*grpcDnsServiceServer) Query(ctx context.Context, in *pb.DnsPacket) (*pb.DnsPacket, error) {
+	msg := &dns.Msg{}
+	msg.Unpack(in.GetMsg())
+	answer := new(dns.Msg)
+	answer.Answer = append(answer.Answer, test.A("example.org. IN A 127.0.0.1"))
+	answer.SetRcode(msg, dns.RcodeSuccess)
+	buf, _ := answer.Pack()
+	return &pb.DnsPacket{Msg: buf}, nil
 }

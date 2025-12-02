@@ -40,7 +40,7 @@ func (r *regexStringRewriter) rewriteString(src string) string {
 	s := r.replacement
 	for groupIndex, groupValue := range regexGroups {
 		groupIndexStr := "{" + strconv.Itoa(groupIndex) + "}"
-		s = strings.Replace(s, groupIndexStr, groupValue, -1)
+		s = strings.ReplaceAll(s, groupIndexStr, groupValue)
 	}
 	return s
 }
@@ -81,8 +81,8 @@ func newSuffixStringRewriter(orig, replacement string) stringRewriter {
 }
 
 func (r *suffixStringRewriter) rewriteString(src string) string {
-	if strings.HasSuffix(src, r.suffix) {
-		return strings.TrimSuffix(src, r.suffix) + r.replacement
+	if before, ok := strings.CutSuffix(src, r.suffix); ok {
+		return before + r.replacement
 	}
 	return src
 }
@@ -92,7 +92,7 @@ type nameRewriterResponseRule struct {
 	stringRewriter
 }
 
-func (r *nameRewriterResponseRule) RewriteResponse(rr dns.RR) {
+func (r *nameRewriterResponseRule) RewriteResponse(res *dns.Msg, rr dns.RR) {
 	rr.Header().Name = r.rewriteString(rr.Header().Name)
 }
 
@@ -101,7 +101,7 @@ type valueRewriterResponseRule struct {
 	stringRewriter
 }
 
-func (r *valueRewriterResponseRule) RewriteResponse(rr dns.RR) {
+func (r *valueRewriterResponseRule) RewriteResponse(res *dns.Msg, rr dns.RR) {
 	value := getRecordValueForRewrite(rr)
 	if value != "" {
 		new := r.rewriteString(value)
@@ -203,8 +203,8 @@ func newPrefixNameRule(nextAction string, auto bool, prefix, replacement string,
 }
 
 func (rule *prefixNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
-	if strings.HasPrefix(state.Name(), rule.prefix) {
-		state.Req.Question[0].Name = rule.replacement + strings.TrimPrefix(state.Name(), rule.prefix)
+	if after, ok := strings.CutPrefix(state.Name(), rule.prefix); ok {
+		state.Req.Question[0].Name = rule.replacement + after
 		return rule.responseRuleFor(state)
 	}
 	return nil, RewriteIgnored
@@ -234,8 +234,8 @@ func newSuffixNameRule(nextAction string, auto bool, suffix, replacement string,
 }
 
 func (rule *suffixNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
-	if strings.HasSuffix(state.Name(), rule.suffix) {
-		state.Req.Question[0].Name = strings.TrimSuffix(state.Name(), rule.suffix) + rule.replacement
+	if before, ok := strings.CutSuffix(state.Name(), rule.suffix); ok {
+		state.Req.Question[0].Name = before + rule.replacement
 		return rule.responseRuleFor(state)
 	}
 	return nil, RewriteIgnored
@@ -257,7 +257,7 @@ func newSubstringNameRule(nextAction string, auto bool, substring, replacement s
 
 func (rule *substringNameRule) Rewrite(ctx context.Context, state request.Request) (ResponseRules, Result) {
 	if strings.Contains(state.Name(), rule.substring) {
-		state.Req.Question[0].Name = strings.Replace(state.Name(), rule.substring, rule.replacement, -1)
+		state.Req.Question[0].Name = strings.ReplaceAll(state.Name(), rule.substring, rule.replacement)
 		return rule.responseRuleFor(state)
 	}
 	return nil, RewriteIgnored
@@ -285,7 +285,7 @@ func (rule *regexNameRule) Rewrite(ctx context.Context, state request.Request) (
 	s := rule.replacement
 	for groupIndex, groupValue := range regexGroups {
 		groupIndexStr := "{" + strconv.Itoa(groupIndex) + "}"
-		s = strings.Replace(s, groupIndexStr, groupValue, -1)
+		s = strings.ReplaceAll(s, groupIndexStr, groupValue)
 	}
 	state.Req.Question[0].Name = s
 	return rule.responseRuleFor(state)
@@ -417,7 +417,7 @@ func parseAnswerRules(name string, args []string) (auto bool, rules ResponseRule
 	if auto && nameRules > 0 {
 		return false, nil, fmt.Errorf("auto name answer rule cannot be combined with explicit name anwer rules")
 	}
-	return
+	return auto, rules, nil
 }
 
 // hasClosingDot returns true if s has a closing dot at the end.
@@ -428,7 +428,7 @@ func hasClosingDot(s string) bool {
 // getSubExprUsage returns the number of subexpressions used in s.
 func getSubExprUsage(s string) int {
 	subExprUsage := 0
-	for i := 0; i <= 100; i++ {
+	for i := range 101 {
 		if strings.Contains(s, "{"+strconv.Itoa(i)+"}") {
 			subExprUsage++
 		}

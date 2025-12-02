@@ -1,19 +1,18 @@
-FROM --platform=$BUILDPLATFORM debian:stable-slim
-SHELL [ "/bin/sh", "-ec" ]
+ARG DEBIAN_IMAGE=debian:stable-slim
+ARG BASE=gcr.io/distroless/static-debian12:nonroot
 
-RUN export DEBCONF_NONINTERACTIVE_SEEN=true \
-           DEBIAN_FRONTEND=noninteractive \
-           DEBIAN_PRIORITY=critical \
-           TERM=linux ; \
-    apt-get -qq update ; \
-    apt-get -yyqq upgrade ; \
-    apt-get -yyqq install ca-certificates ; \
-    apt-get clean
+FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get -qq update \
+    && apt-get -qq --no-install-recommends install libcap2-bin
+COPY coredns /coredns
+RUN setcap cap_net_bind_service=+ep /coredns
 
-FROM --platform=$TARGETPLATFORM scratch
-
-COPY --from=0 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-ADD coredns /coredns
-
+FROM ${BASE}
+COPY --from=build /coredns /coredns
+USER nonroot:nonroot
+# Reset the working directory inherited from the base image back to the expected default:
+# https://github.com/coredns/coredns/issues/7009#issuecomment-3124851608
+WORKDIR /
 EXPOSE 53 53/udp
 ENTRYPOINT ["/coredns"]

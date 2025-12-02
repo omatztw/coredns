@@ -48,6 +48,9 @@ type Cache struct {
 	pexcept []string
 	nexcept []string
 
+	// Keep ttl option
+	keepttl bool
+
 	// Testing.
 	now func() time.Time
 }
@@ -76,7 +79,7 @@ func New() *Cache {
 // key returns key under which we store the item, -1 will be returned if we don't store the message.
 // Currently we do not cache Truncated, errors zone transfers or dynamic update messages.
 // qname holds the already lowercased qname.
-func key(qname string, m *dns.Msg, t response.Type, do bool) (bool, uint64) {
+func key(qname string, m *dns.Msg, t response.Type, do, cd bool) (bool, uint64) {
 	// We don't store truncated responses.
 	if m.Truncated {
 		return false, 0
@@ -86,16 +89,22 @@ func key(qname string, m *dns.Msg, t response.Type, do bool) (bool, uint64) {
 		return false, 0
 	}
 
-	return true, hash(qname, m.Question[0].Qtype, do)
+	return true, hash(qname, m.Question[0].Qtype, do, cd)
 }
 
 var one = []byte("1")
 var zero = []byte("0")
 
-func hash(qname string, qtype uint16, do bool) uint64 {
+func hash(qname string, qtype uint16, do, cd bool) uint64 {
 	h := fnv.New64()
 
 	if do {
+		h.Write(one)
+	} else {
+		h.Write(zero)
+	}
+
+	if cd {
 		h.Write(one)
 	} else {
 		h.Write(zero)
@@ -108,13 +117,7 @@ func hash(qname string, qtype uint16, do bool) uint64 {
 }
 
 func computeTTL(msgTTL, minTTL, maxTTL time.Duration) time.Duration {
-	ttl := msgTTL
-	if ttl < minTTL {
-		ttl = minTTL
-	}
-	if ttl > maxTTL {
-		ttl = maxTTL
-	}
+	ttl := min(max(msgTTL, minTTL), maxTTL)
 	return ttl
 }
 
@@ -126,6 +129,7 @@ type ResponseWriter struct {
 	server string // Server handling the request.
 
 	do         bool // When true the original request had the DO bit set.
+	cd         bool // When true the original request had the CD bit set.
 	ad         bool // When true the original request had the AD bit set.
 	prefetch   bool // When true write nothing back to the client.
 	remoteAddr net.Addr
@@ -156,6 +160,7 @@ func newPrefetchResponseWriter(server string, state request.Request, c *Cache) *
 		state:          state,
 		server:         server,
 		do:             state.Do(),
+		cd:             state.Req.CheckingDisabled,
 		prefetch:       true,
 		remoteAddr:     addr,
 	}
@@ -171,19 +176,33 @@ func (w *ResponseWriter) RemoteAddr() net.Addr {
 
 // WriteMsg implements the dns.ResponseWriter interface.
 func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
+	res = res.Copy()
 	mt, _ := response.Typify(res, w.now().UTC())
 
 	// key returns empty string for anything we don't want to cache.
-	hasKey, key := key(w.state.Name(), res, mt, w.do)
+	hasKey, key := key(w.state.Name(), res, mt, w.do, w.cd)
 
 	msgTTL := dnsutil.MinimalTTL(res, mt)
 	var duration time.Duration
-	if mt == response.NameError || mt == response.NoData {
+	switch mt {
+	case response.NameError, response.NoData:
 		duration = computeTTL(msgTTL, w.minnttl, w.nttl)
-	} else if mt == response.ServerError {
+	case response.ServerError:
 		duration = w.failttl
-	} else {
+	default:
 		duration = computeTTL(msgTTL, w.minpttl, w.pttl)
+	}
+
+	// Apply capped TTL to this reply to avoid jarring TTL experience 1799 -> 8 (e.g.)
+	ttl := uint32(duration.Seconds())
+	res.Answer = filterRRSlice(res.Answer, ttl, false)
+	res.Ns = filterRRSlice(res.Ns, ttl, false)
+	res.Extra = filterRRSlice(res.Extra, ttl, false)
+
+	if !w.do && !w.ad {
+		// unset AD bit if requester is not OK with DNSSEC
+		// But retain AD bit if requester set the AD bit in the request, per RFC6840 5.7-5.8
+		res.AuthenticatedData = false
 	}
 
 	if hasKey && duration > 0 {
@@ -199,18 +218,6 @@ func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
 
 	if w.prefetch {
 		return nil
-	}
-
-	// Apply capped TTL to this reply to avoid jarring TTL experience 1799 -> 8 (e.g.)
-	ttl := uint32(duration.Seconds())
-	res.Answer = filterRRSlice(res.Answer, ttl, false)
-	res.Ns = filterRRSlice(res.Ns, ttl, false)
-	res.Extra = filterRRSlice(res.Extra, ttl, false)
-
-	if !w.do && !w.ad {
-		// unset AD bit if requester is not OK with DNSSEC
-		// But retain AD bit if requester set the AD bit in the request, per RFC6840 5.7-5.8
-		res.AuthenticatedData = false
 	}
 
 	return w.ResponseWriter.WriteMsg(res)
@@ -295,9 +302,9 @@ func (w *verifyStaleResponseWriter) WriteMsg(res *dns.Msg) error {
 }
 
 const (
-	maxTTL  = dnsutil.MaximumDefaulTTL
+	maxTTL  = dnsutil.MaximumDefaultTTL
 	minTTL  = dnsutil.MinimalDefaultTTL
-	maxNTTL = dnsutil.MaximumDefaulTTL / 2
+	maxNTTL = dnsutil.MaximumDefaultTTL / 2
 	minNTTL = dnsutil.MinimalDefaultTTL
 
 	defaultCap = 10000 // default capacity of the cache.

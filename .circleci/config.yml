@@ -13,16 +13,16 @@ initWorkingDir: &initWorkingDir
     GOROOT=$(go env GOROOT)
     sudo rm -r $(go env GOROOT)
     sudo mkdir $GOROOT
-    LATEST=$(curl -s https://go.dev/VERSION?m=text)
+    LATEST=$(curl -s https://go.dev/VERSION?m=text | grep -v time)
     curl https://dl.google.com/go/${LATEST}.linux-amd64.tar.gz | sudo tar xz -C $GOROOT --strip-components=1
 
 integrationDefaults: &integrationDefaults
   machine:
-    image: ubuntu-2004:2022.04.2
+    image: default
   working_directory: ~/go/src/${CIRCLE_PROJECT_USERNAME}/coredns
   environment:
-    - K8S_VERSION: v1.22.0
-    - KIND_VERSION: v0.11.1
+    - K8S_VERSION: v1.34.0
+    - KIND_VERSION: v0.30.0
     - KUBECONFIG: /home/circleci/.kube/kind-config-kind
 
 setupKubernetes: &setupKubernetes

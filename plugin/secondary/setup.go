@@ -27,11 +27,13 @@ func setup(c *caddy.Controller) error {
 		n := zones.Names[i]
 		z := zones.Z[n]
 		if len(z.TransferFrom) > 0 {
+			// In order to support secondary plugin reloading.
+			updateShutdown := make(chan bool)
+
 			c.OnStartup(func() error {
 				z.StartupOnce.Do(func() {
 					go func() {
 						dur := time.Millisecond * 250
-						step := time.Duration(2)
 						max := time.Second * 10
 						for {
 							err := z.TransferIn()
@@ -40,14 +42,23 @@ func setup(c *caddy.Controller) error {
 							}
 							log.Warningf("All '%s' masters failed to transfer, retrying in %s: %s", n, dur.String(), err)
 							time.Sleep(dur)
-							dur = step * dur
+							dur <<= 1 // double the duration
 							if dur > max {
 								dur = max
 							}
+							select {
+							case <-updateShutdown:
+								return
+							default:
+							}
 						}
-						z.Update()
+						z.Update(updateShutdown)
 					}()
 				})
+				return nil
+			})
+			c.OnShutdown(func() error {
+				updateShutdown <- true
 				return nil
 			})
 		}
@@ -72,6 +83,7 @@ func secondaryParse(c *caddy.Controller) (file.Zones, error) {
 				names = append(names, origins[i])
 			}
 
+			hasTransfer := false
 			for c.NextBlock() {
 				var f []string
 
@@ -82,6 +94,7 @@ func secondaryParse(c *caddy.Controller) (file.Zones, error) {
 					if err != nil {
 						return file.Zones{}, err
 					}
+					hasTransfer = true
 				default:
 					return file.Zones{}, c.Errf("unknown property '%s'", c.Val())
 				}
@@ -92,6 +105,9 @@ func secondaryParse(c *caddy.Controller) (file.Zones, error) {
 					}
 					z[origin].Upstream = upstream.New()
 				}
+			}
+			if !hasTransfer {
+				return file.Zones{}, c.Err("secondary zones require a transfer from property")
 			}
 		}
 	}

@@ -12,28 +12,28 @@ import (
 	"github.com/coredns/coredns/plugin/test"
 	crequest "github.com/coredns/coredns/request"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/service/route53"
-	"github.com/aws/aws-sdk-go/service/route53/route53iface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
+	"github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/miekg/dns"
 )
 
 type fakeRoute53 struct {
-	route53iface.Route53API
+	route53Client
 }
 
-func (fakeRoute53) ListHostedZonesByNameWithContext(_ aws.Context, input *route53.ListHostedZonesByNameInput, _ ...request.Option) (*route53.ListHostedZonesByNameOutput, error) {
+func (fakeRoute53) ListHostedZonesByName(_ context.Context, input *route53.ListHostedZonesByNameInput, optFns ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
 	return nil, nil
 }
 
-func (fakeRoute53) ListResourceRecordSetsPagesWithContext(_ aws.Context, in *route53.ListResourceRecordSetsInput, fn func(*route53.ListResourceRecordSetsOutput, bool) bool, _ ...request.Option) error {
-	if aws.StringValue(in.HostedZoneId) == "0987654321" {
-		return errors.New("bad. zone is bad")
+func (fakeRoute53) ListResourceRecordSets(_ context.Context, in *route53.ListResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error) {
+	if aws.ToString(in.HostedZoneId) == "0987654321" {
+		return nil, errors.New("bad. zone is bad")
 	}
-	rrsResponse := map[string][]*route53.ResourceRecordSet{}
+	rrsResponse := map[string][]types.ResourceRecordSet{}
 	for _, r := range []struct {
-		rType, name, value, hostedZoneID string
+		rType                     types.RRType
+		name, value, hostedZoneID string
 	}{
 		{"A", "example.org.", "1.2.3.4", "1234567890"},
 		{"A", "www.example.org", "1.2.3.4", "1234567890"},
@@ -54,11 +54,11 @@ func (fakeRoute53) ListResourceRecordSetsPagesWithContext(_ aws.Context, in *rou
 	} {
 		rrs, ok := rrsResponse[r.hostedZoneID]
 		if !ok {
-			rrs = make([]*route53.ResourceRecordSet, 0)
+			rrs = make([]types.ResourceRecordSet, 0)
 		}
-		rrs = append(rrs, &route53.ResourceRecordSet{Type: aws.String(r.rType),
+		rrs = append(rrs, types.ResourceRecordSet{Type: r.rType,
 			Name: aws.String(r.name),
-			ResourceRecords: []*route53.ResourceRecord{
+			ResourceRecords: []types.ResourceRecord{
 				{
 					Value: aws.String(r.value),
 				},
@@ -68,17 +68,14 @@ func (fakeRoute53) ListResourceRecordSetsPagesWithContext(_ aws.Context, in *rou
 		rrsResponse[r.hostedZoneID] = rrs
 	}
 
-	if ok := fn(&route53.ListResourceRecordSetsOutput{
-		ResourceRecordSets: rrsResponse[aws.StringValue(in.HostedZoneId)],
-	}, true); !ok {
-		return errors.New("paging function return false")
-	}
-	return nil
+	return &route53.ListResourceRecordSetsOutput{
+		ResourceRecordSets: rrsResponse[aws.ToString(in.HostedZoneId)],
+		IsTruncated:        false,
+	}, nil
 }
 
 func TestRoute53(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	r, err := New(ctx, fakeRoute53{}, map[string][]string{"bad.": {"0987654321"}}, time.Minute)
 	if err != nil {
@@ -131,20 +128,20 @@ func TestRoute53(t *testing.T) {
 	}{
 		// 0. example.org A found - success.
 		{
-			qname: "example.org",
-			qtype: dns.TypeA,
+			qname:      "example.org",
+			qtype:      dns.TypeA,
 			wantAnswer: []string{"example.org.	300	IN	A	1.2.3.4"},
 		},
 		// 1. example.org AAAA found - success.
 		{
-			qname: "example.org",
-			qtype: dns.TypeAAAA,
+			qname:      "example.org",
+			qtype:      dns.TypeAAAA,
 			wantAnswer: []string{"example.org.	300	IN	AAAA	2001:db8:85a3::8a2e:370:7334"},
 		},
 		// 2. exampled.org PTR found - success.
 		{
-			qname: "example.org",
-			qtype: dns.TypePTR,
+			qname:      "example.org",
+			qtype:      dns.TypePTR,
 			wantAnswer: []string{"example.org.	300	IN	PTR	ptr.example.org."},
 		},
 		// 3. sample.example.org points to example.org CNAME.
@@ -160,14 +157,14 @@ func TestRoute53(t *testing.T) {
 		// 4. Explicit CNAME query for sample.example.org.
 		// Query must return just CNAME.
 		{
-			qname: "sample.example.org",
-			qtype: dns.TypeCNAME,
+			qname:      "sample.example.org",
+			qtype:      dns.TypeCNAME,
 			wantAnswer: []string{"sample.example.org.	300	IN	CNAME	example.org."},
 		},
 		// 5. Explicit SOA query for example.org.
 		{
-			qname: "example.org",
-			qtype: dns.TypeNS,
+			qname:  "example.org",
+			qtype:  dns.TypeNS,
 			wantNS: []string{"org.	300	IN	SOA	ns-1536.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"},
 		},
 		// 6. AAAA query for split-example.org must return NODATA.
@@ -175,7 +172,7 @@ func TestRoute53(t *testing.T) {
 			qname:       "split-example.gov",
 			qtype:       dns.TypeAAAA,
 			wantRetCode: dns.RcodeSuccess,
-			wantNS: []string{"org.	300	IN	SOA	ns-1536.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"},
+			wantNS:      []string{"org.	300	IN	SOA	ns-1536.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"},
 		},
 		// 7. Zone not configured.
 		{
@@ -190,24 +187,24 @@ func TestRoute53(t *testing.T) {
 			qtype:        dns.TypeA,
 			wantRetCode:  dns.RcodeSuccess,
 			wantMsgRCode: dns.RcodeNameError,
-			wantNS: []string{"org.	300	IN	SOA	ns-1536.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"},
+			wantNS:       []string{"org.	300	IN	SOA	ns-1536.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"},
 		},
 		// 9. No record found. Fallthrough.
 		{
-			qname: "example.gov",
-			qtype: dns.TypeA,
+			qname:      "example.gov",
+			qtype:      dns.TypeA,
 			wantAnswer: []string{"example.gov.	300	IN	A	2.4.6.8"},
 		},
 		// 10. other-zone.example.org is stored in a different hosted zone. success
 		{
-			qname: "other-example.org",
-			qtype: dns.TypeA,
+			qname:      "other-example.org",
+			qtype:      dns.TypeA,
 			wantAnswer: []string{"other-example.org.	300	IN	A	3.5.7.9"},
 		},
 		// 11. split-example.org only has A record. Expect NODATA.
 		{
-			qname: "split-example.org",
-			qtype: dns.TypeAAAA,
+			qname:  "split-example.org",
+			qtype:  dns.TypeAAAA,
 			wantNS: []string{"org.	300	IN	SOA	ns-15.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"},
 		},
 		// 12. *.www.example.org is a wildcard CNAME to www.example.org.
@@ -231,7 +228,7 @@ func TestRoute53(t *testing.T) {
 		if err != tc.expectedErr {
 			t.Fatalf("Test %d: Expected error %v, but got %v", ti, tc.expectedErr, err)
 		}
-		if code != int(tc.wantRetCode) {
+		if code != tc.wantRetCode {
 			t.Fatalf("Test %d: Expected returned status code %s, but got %s", ti, dns.RcodeToString[tc.wantRetCode], dns.RcodeToString[code])
 		}
 
@@ -255,7 +252,7 @@ func TestRoute53(t *testing.T) {
 			for i, ns := range rec.Msg.Ns {
 				got, ok := ns.(*dns.SOA)
 				if !ok {
-					t.Errorf("Test %d: Unexpected NS type. Want: SOA, got: %v", ti, reflect.TypeOf(got))
+					t.Errorf("Test %d: Unexpected NS type. Want: SOA, got: %v", ti, reflect.TypeFor[*dns.SOA]())
 				}
 				if got.String() != tc.wantNS[i] {
 					t.Errorf("Test %d: Unexpected NS.\nWant: %v\nGot: %v", ti, tc.wantNS[i], got)
