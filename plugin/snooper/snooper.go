@@ -1,5 +1,5 @@
 // Package snooper implements a CoreDNS plugin that snoops DNS A record responses
-// and stores FQDN to IP mappings in a SQLite database for later use (e.g., LBO routing).
+// and stores FQDN to IP mappings in a PostgreSQL database for later use (e.g., LBO routing).
 package snooper
 
 import (
@@ -66,41 +66,119 @@ func (sw *snoopResponseWriter) WriteMsg(res *dns.Msg) error {
 		}
 	}
 
-	// Extract A records from answer section
-	sw.extractAndStore(res.Answer)
-
-	// Also check additional section (often contains glue records)
-	sw.extractAndStore(res.Extra)
+	// Extract and store records with CNAME resolution
+	sw.extractAndStoreWithCNAME(res)
 
 	return sw.ResponseWriter.WriteMsg(res)
 }
 
-// extractAndStore extracts A records from RR slice and stores them in DB.
-func (sw *snoopResponseWriter) extractAndStore(rrs []dns.RR) {
-	var records []DNSRecord
+// extractAndStoreWithCNAME extracts A records and also maps the original QNAME
+// through CNAME chains to the resolved IPs.
+func (sw *snoopResponseWriter) extractAndStoreWithCNAME(res *dns.Msg) {
+	// Get original query name
+	var qname string
+	if len(sw.request.Question) > 0 {
+		qname = normalizeFQDN(sw.request.Question[0].Name)
+	}
 
-	for _, rr := range rrs {
+	// Build CNAME chain map: source -> target
+	cnameMap := make(map[string]string)
+	// Collect A records: name -> []IP
+	aRecords := make(map[string][]ipWithTTL)
+
+	// First pass: collect CNAMEs and A records from answer section
+	for _, rr := range res.Answer {
 		switch r := rr.(type) {
+		case *dns.CNAME:
+			src := normalizeFQDN(r.Hdr.Name)
+			dst := normalizeFQDN(r.Target)
+			cnameMap[src] = dst
+			log.Debugf("snooped CNAME: %s -> %s", src, dst)
+
 		case *dns.A:
-			fqdn := normalizeFQDN(r.Hdr.Name)
-			ip := r.A.String()
-			ttl := r.Hdr.Ttl
-
-			records = append(records, DNSRecord{
-				FQDN: fqdn,
-				IP:   ip,
-				TTL:  ttl,
+			name := normalizeFQDN(r.Hdr.Name)
+			aRecords[name] = append(aRecords[name], ipWithTTL{
+				IP:  r.A.String(),
+				TTL: r.Hdr.Ttl,
 			})
-
-			log.Debugf("snooped A record: %s -> %s (TTL: %d)", fqdn, ip, ttl)
+			log.Debugf("snooped A record: %s -> %s (TTL: %d)", name, r.A.String(), r.Hdr.Ttl)
 		}
 	}
 
+	// Also check additional section for glue records
+	for _, rr := range res.Extra {
+		if r, ok := rr.(*dns.A); ok {
+			name := normalizeFQDN(r.Hdr.Name)
+			aRecords[name] = append(aRecords[name], ipWithTTL{
+				IP:  r.A.String(),
+				TTL: r.Hdr.Ttl,
+			})
+		}
+	}
+
+	// Build final records to store
+	var records []DNSRecord
+
+	// Store direct A records
+	for name, ips := range aRecords {
+		for _, ip := range ips {
+			records = append(records, DNSRecord{
+				FQDN: name,
+				IP:   ip.IP,
+				TTL:  ip.TTL,
+			})
+		}
+	}
+
+	// Resolve CNAME chains and map original QNAME to IPs
+	if qname != "" {
+		// Follow CNAME chain from qname
+		resolvedIPs := sw.resolveCNAMEChain(qname, cnameMap, aRecords, 10)
+		for _, ip := range resolvedIPs {
+			// Only add if qname is different from the A record's name
+			// (avoid duplicates if qname directly has A record)
+			if _, directA := aRecords[qname]; !directA {
+				records = append(records, DNSRecord{
+					FQDN: qname,
+					IP:   ip.IP,
+					TTL:  ip.TTL,
+				})
+				log.Debugf("snooped CNAME-resolved: %s -> %s (TTL: %d)", qname, ip.IP, ip.TTL)
+			}
+		}
+	}
+
+	// Store all records
 	if len(records) > 0 {
 		if err := sw.snooper.DB.UpsertBatch(records); err != nil {
 			log.Errorf("failed to store DNS records: %v", err)
 		}
 	}
+}
+
+// ipWithTTL holds an IP address with its TTL
+type ipWithTTL struct {
+	IP  string
+	TTL uint32
+}
+
+// resolveCNAMEChain follows CNAME chain and returns all resolved IPs
+func (sw *snoopResponseWriter) resolveCNAMEChain(name string, cnameMap map[string]string, aRecords map[string][]ipWithTTL, maxDepth int) []ipWithTTL {
+	if maxDepth <= 0 {
+		return nil
+	}
+
+	// Check if this name has direct A records
+	if ips, ok := aRecords[name]; ok {
+		return ips
+	}
+
+	// Check if this name has a CNAME
+	if target, ok := cnameMap[name]; ok {
+		return sw.resolveCNAMEChain(target, cnameMap, aRecords, maxDepth-1)
+	}
+
+	return nil
 }
 
 // Write implements the dns.ResponseWriter interface.
