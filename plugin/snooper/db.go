@@ -2,6 +2,7 @@ package snooper
 
 import (
 	"database/sql"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,13 +11,14 @@ import (
 
 // DNSRecord represents a DNS A record mapping
 type DNSRecord struct {
-	ID        int64
-	FQDN      string
-	IP        string
-	TTL       uint32
-	FirstSeen time.Time
-	LastSeen  time.Time
-	Count     int64
+	ID           int64
+	FQDN         string
+	FQDNReversed string
+	IP           string
+	TTL          uint32
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	Count        int64
 }
 
 // DB wraps the PostgreSQL database connection
@@ -60,6 +62,7 @@ func (d *DB) initSchema() error {
 	CREATE TABLE IF NOT EXISTS dns_records (
 		id SERIAL PRIMARY KEY,
 		fqdn TEXT NOT NULL,
+		fqdn_reversed TEXT NOT NULL,
 		ip INET NOT NULL,
 		ttl INTEGER NOT NULL DEFAULT 0,
 		first_seen TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
@@ -68,6 +71,11 @@ func (d *DB) initSchema() error {
 		UNIQUE(fqdn, ip)
 	);
 
+	-- Index on reversed FQDN for efficient prefix matching (suffix search on original)
+	-- Pattern '%.google.com' becomes 'com.google.%' which uses this index
+	CREATE INDEX IF NOT EXISTS idx_dns_records_fqdn_reversed ON dns_records(fqdn_reversed text_pattern_ops);
+
+	-- Keep original FQDN index for exact match queries
 	CREATE INDEX IF NOT EXISTS idx_dns_records_fqdn ON dns_records(fqdn);
 	CREATE INDEX IF NOT EXISTS idx_dns_records_ip ON dns_records(ip);
 	CREATE INDEX IF NOT EXISTS idx_dns_records_last_seen ON dns_records(last_seen);
@@ -77,21 +85,60 @@ func (d *DB) initSchema() error {
 	return err
 }
 
+// ReverseFQDN reverses the labels of an FQDN for efficient suffix matching
+// e.g., "www.google.com" -> "com.google.www"
+func ReverseFQDN(fqdn string) string {
+	parts := strings.Split(fqdn, ".")
+	// Reverse the slice
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, ".")
+}
+
+// ReversePattern converts a suffix pattern to a prefix pattern for reversed FQDN
+// e.g., "%.google.com" -> "com.google.%"
+func ReversePattern(pattern string) string {
+	// Handle the wildcard at the beginning
+	hasPrefix := strings.HasPrefix(pattern, "%")
+	hasSuffix := strings.HasSuffix(pattern, "%")
+
+	// Remove wildcards temporarily
+	p := strings.TrimPrefix(pattern, "%")
+	p = strings.TrimSuffix(p, "%")
+	p = strings.Trim(p, ".")
+
+	// Reverse the domain parts
+	reversed := ReverseFQDN(p)
+
+	// Re-add wildcards in reversed positions
+	if hasPrefix {
+		reversed = reversed + ".%"
+	}
+	if hasSuffix {
+		reversed = "%." + reversed
+	}
+
+	return reversed
+}
+
 // Upsert inserts or updates a DNS record
 func (d *DB) Upsert(fqdn, ip string, ttl uint32) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	fqdnReversed := ReverseFQDN(fqdn)
+
 	query := `
-	INSERT INTO dns_records (fqdn, ip, ttl, first_seen, last_seen, count)
-	VALUES ($1, $2, $3, NOW(), NOW(), 1)
+	INSERT INTO dns_records (fqdn, fqdn_reversed, ip, ttl, first_seen, last_seen, count)
+	VALUES ($1, $2, $3, $4, NOW(), NOW(), 1)
 	ON CONFLICT(fqdn, ip) DO UPDATE SET
 		ttl = EXCLUDED.ttl,
 		last_seen = NOW(),
 		count = dns_records.count + 1
 	`
 
-	_, err := d.db.Exec(query, fqdn, ip, ttl)
+	_, err := d.db.Exec(query, fqdn, fqdnReversed, ip, ttl)
 	return err
 }
 
@@ -107,8 +154,8 @@ func (d *DB) UpsertBatch(records []DNSRecord) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO dns_records (fqdn, ip, ttl, first_seen, last_seen, count)
-		VALUES ($1, $2, $3, NOW(), NOW(), 1)
+		INSERT INTO dns_records (fqdn, fqdn_reversed, ip, ttl, first_seen, last_seen, count)
+		VALUES ($1, $2, $3, $4, NOW(), NOW(), 1)
 		ON CONFLICT(fqdn, ip) DO UPDATE SET
 			ttl = EXCLUDED.ttl,
 			last_seen = NOW(),
@@ -120,7 +167,8 @@ func (d *DB) UpsertBatch(records []DNSRecord) error {
 	defer stmt.Close()
 
 	for _, r := range records {
-		if _, err := stmt.Exec(r.FQDN, r.IP, r.TTL); err != nil {
+		fqdnReversed := ReverseFQDN(r.FQDN)
+		if _, err := stmt.Exec(r.FQDN, fqdnReversed, r.IP, r.TTL); err != nil {
 			return err
 		}
 	}
@@ -131,7 +179,7 @@ func (d *DB) UpsertBatch(records []DNSRecord) error {
 // GetByFQDN returns all records matching the given FQDN
 func (d *DB) GetByFQDN(fqdn string) ([]DNSRecord, error) {
 	rows, err := d.db.Query(`
-		SELECT id, fqdn, ip::TEXT, ttl, first_seen, last_seen, count
+		SELECT id, fqdn, fqdn_reversed, ip::TEXT, ttl, first_seen, last_seen, count
 		FROM dns_records
 		WHERE fqdn = $1
 		ORDER BY last_seen DESC
@@ -147,7 +195,7 @@ func (d *DB) GetByFQDN(fqdn string) ([]DNSRecord, error) {
 // GetByIP returns all records matching the given IP
 func (d *DB) GetByIP(ip string) ([]DNSRecord, error) {
 	rows, err := d.db.Query(`
-		SELECT id, fqdn, ip::TEXT, ttl, first_seen, last_seen, count
+		SELECT id, fqdn, fqdn_reversed, ip::TEXT, ttl, first_seen, last_seen, count
 		FROM dns_records
 		WHERE ip = $1::INET
 		ORDER BY last_seen DESC
@@ -162,13 +210,16 @@ func (d *DB) GetByIP(ip string) ([]DNSRecord, error) {
 
 // GetByFQDNPattern returns all records matching the given FQDN pattern (SQL LIKE)
 // Use % as wildcard, e.g., "%.google.com" for all google.com subdomains
+// The pattern is automatically converted to use the reversed FQDN index for efficiency
 func (d *DB) GetByFQDNPattern(pattern string) ([]DNSRecord, error) {
+	reversedPattern := ReversePattern(pattern)
+
 	rows, err := d.db.Query(`
-		SELECT id, fqdn, ip::TEXT, ttl, first_seen, last_seen, count
+		SELECT id, fqdn, fqdn_reversed, ip::TEXT, ttl, first_seen, last_seen, count
 		FROM dns_records
-		WHERE fqdn LIKE $1
+		WHERE fqdn_reversed LIKE $1
 		ORDER BY last_seen DESC
-	`, pattern)
+	`, reversedPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -179,13 +230,15 @@ func (d *DB) GetByFQDNPattern(pattern string) ([]DNSRecord, error) {
 
 // GetActiveByFQDNPattern returns records matching pattern that were seen within maxAge
 func (d *DB) GetActiveByFQDNPattern(pattern string, maxAge time.Duration) ([]DNSRecord, error) {
+	reversedPattern := ReversePattern(pattern)
 	cutoff := time.Now().Add(-maxAge)
+
 	rows, err := d.db.Query(`
-		SELECT id, fqdn, ip::TEXT, ttl, first_seen, last_seen, count
+		SELECT id, fqdn, fqdn_reversed, ip::TEXT, ttl, first_seen, last_seen, count
 		FROM dns_records
-		WHERE fqdn LIKE $1 AND last_seen > $2
+		WHERE fqdn_reversed LIKE $1 AND last_seen > $2
 		ORDER BY last_seen DESC
-	`, pattern, cutoff)
+	`, reversedPattern, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +250,7 @@ func (d *DB) GetActiveByFQDNPattern(pattern string, maxAge time.Duration) ([]DNS
 // GetAll returns all records
 func (d *DB) GetAll() ([]DNSRecord, error) {
 	rows, err := d.db.Query(`
-		SELECT id, fqdn, ip::TEXT, ttl, first_seen, last_seen, count
+		SELECT id, fqdn, fqdn_reversed, ip::TEXT, ttl, first_seen, last_seen, count
 		FROM dns_records
 		ORDER BY last_seen DESC
 	`)
@@ -235,7 +288,7 @@ func scanRecords(rows *sql.Rows) ([]DNSRecord, error) {
 	var records []DNSRecord
 	for rows.Next() {
 		var r DNSRecord
-		if err := rows.Scan(&r.ID, &r.FQDN, &r.IP, &r.TTL, &r.FirstSeen, &r.LastSeen, &r.Count); err != nil {
+		if err := rows.Scan(&r.ID, &r.FQDN, &r.FQDNReversed, &r.IP, &r.TTL, &r.FirstSeen, &r.LastSeen, &r.Count); err != nil {
 			return nil, err
 		}
 		records = append(records, r)

@@ -24,13 +24,14 @@ type Config struct {
 
 // DNSRecord represents a record from the snooper database
 type DNSRecord struct {
-	ID        int64
-	FQDN      string
-	IP        string
-	TTL       int
-	FirstSeen time.Time
-	LastSeen  time.Time
-	Count     int64
+	ID           int64
+	FQDN         string
+	FQDNReversed string
+	IP           string
+	TTL          int
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	Count        int64
 }
 
 // SnooperDB wraps the database connection
@@ -57,20 +58,56 @@ func NewSnooperDB(dsn string) (*SnooperDB, error) {
 	return &SnooperDB{db: db}, nil
 }
 
+// ReverseFQDN reverses the labels of an FQDN for efficient suffix matching
+// e.g., "www.google.com" -> "com.google.www"
+func ReverseFQDN(fqdn string) string {
+	parts := strings.Split(fqdn, ".")
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, ".")
+}
+
+// ReversePattern converts a suffix pattern to a prefix pattern for reversed FQDN
+// e.g., "%.google.com" -> "com.google.%"
+func ReversePattern(pattern string) string {
+	hasPrefix := strings.HasPrefix(pattern, "%")
+	hasSuffix := strings.HasSuffix(pattern, "%")
+
+	p := strings.TrimPrefix(pattern, "%")
+	p = strings.TrimSuffix(p, "%")
+	p = strings.Trim(p, ".")
+
+	reversed := ReverseFQDN(p)
+
+	if hasPrefix {
+		reversed = reversed + ".%"
+	}
+	if hasSuffix {
+		reversed = "%." + reversed
+	}
+
+	return reversed
+}
+
 // GetIPsByPattern returns all unique IPs matching the FQDN pattern
 // pattern uses SQL LIKE syntax: % = any characters, _ = single character
 // Examples:
 //   - "%.google.com" - all subdomains of google.com
 //   - "www.%" - all domains starting with www.
 //   - "%.cdn.%" - any FQDN containing .cdn.
+//
+// The pattern is automatically converted to use the reversed FQDN index for efficiency
 func (s *SnooperDB) GetIPsByPattern(pattern string, maxAge time.Duration) ([]string, error) {
+	reversedPattern := ReversePattern(pattern)
 	cutoff := time.Now().Add(-maxAge)
+
 	rows, err := s.db.Query(`
 		SELECT DISTINCT ip::TEXT
 		FROM dns_records
-		WHERE fqdn LIKE $1 AND last_seen > $2
+		WHERE fqdn_reversed LIKE $1 AND last_seen > $2
 		ORDER BY ip
-	`, pattern, cutoff)
+	`, reversedPattern, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
@@ -93,13 +130,13 @@ func (s *SnooperDB) GetIPsByPatterns(patterns []string, maxAge time.Duration) ([
 		return nil, nil
 	}
 
-	// Build query with multiple LIKE conditions
+	// Build query with multiple LIKE conditions using reversed patterns
 	cutoff := time.Now().Add(-maxAge)
 	conditions := make([]string, len(patterns))
 	args := make([]interface{}, len(patterns)+1)
 	for i, p := range patterns {
-		conditions[i] = fmt.Sprintf("fqdn LIKE $%d", i+1)
-		args[i] = p
+		conditions[i] = fmt.Sprintf("fqdn_reversed LIKE $%d", i+1)
+		args[i] = ReversePattern(p)
 	}
 	args[len(patterns)] = cutoff
 
@@ -129,13 +166,15 @@ func (s *SnooperDB) GetIPsByPatterns(patterns []string, maxAge time.Duration) ([
 
 // GetRecordsByPattern returns full records matching the FQDN pattern
 func (s *SnooperDB) GetRecordsByPattern(pattern string, maxAge time.Duration) ([]DNSRecord, error) {
+	reversedPattern := ReversePattern(pattern)
 	cutoff := time.Now().Add(-maxAge)
+
 	rows, err := s.db.Query(`
-		SELECT id, fqdn, ip::TEXT, ttl, first_seen, last_seen, count
+		SELECT id, fqdn, fqdn_reversed, ip::TEXT, ttl, first_seen, last_seen, count
 		FROM dns_records
-		WHERE fqdn LIKE $1 AND last_seen > $2
+		WHERE fqdn_reversed LIKE $1 AND last_seen > $2
 		ORDER BY last_seen DESC
-	`, pattern, cutoff)
+	`, reversedPattern, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
 	}
@@ -144,7 +183,7 @@ func (s *SnooperDB) GetRecordsByPattern(pattern string, maxAge time.Duration) ([
 	var records []DNSRecord
 	for rows.Next() {
 		var r DNSRecord
-		if err := rows.Scan(&r.ID, &r.FQDN, &r.IP, &r.TTL, &r.FirstSeen, &r.LastSeen, &r.Count); err != nil {
+		if err := rows.Scan(&r.ID, &r.FQDN, &r.FQDNReversed, &r.IP, &r.TTL, &r.FirstSeen, &r.LastSeen, &r.Count); err != nil {
 			return nil, fmt.Errorf("scan failed: %w", err)
 		}
 		records = append(records, r)
@@ -156,7 +195,7 @@ func (s *SnooperDB) GetRecordsByPattern(pattern string, maxAge time.Duration) ([
 func (s *SnooperDB) GetIPsInSubnet(cidr string, maxAge time.Duration) ([]DNSRecord, error) {
 	cutoff := time.Now().Add(-maxAge)
 	rows, err := s.db.Query(`
-		SELECT id, fqdn, ip::TEXT, ttl, first_seen, last_seen, count
+		SELECT id, fqdn, fqdn_reversed, ip::TEXT, ttl, first_seen, last_seen, count
 		FROM dns_records
 		WHERE ip << $1::inet AND last_seen > $2
 		ORDER BY ip
@@ -169,7 +208,7 @@ func (s *SnooperDB) GetIPsInSubnet(cidr string, maxAge time.Duration) ([]DNSReco
 	var records []DNSRecord
 	for rows.Next() {
 		var r DNSRecord
-		if err := rows.Scan(&r.ID, &r.FQDN, &r.IP, &r.TTL, &r.FirstSeen, &r.LastSeen, &r.Count); err != nil {
+		if err := rows.Scan(&r.ID, &r.FQDN, &r.FQDNReversed, &r.IP, &r.TTL, &r.FirstSeen, &r.LastSeen, &r.Count); err != nil {
 			return nil, fmt.Errorf("scan failed: %w", err)
 		}
 		records = append(records, r)
